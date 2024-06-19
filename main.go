@@ -37,11 +37,13 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
 	rdebug "runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,7 +54,6 @@ import (
 	. "github.com/abakum/cssh/tssh"
 	version "github.com/abakum/version/lib"
 	"github.com/xlab/closer"
-	"golang.org/x/crypto/ssh"
 )
 
 type Parser struct {
@@ -73,7 +74,7 @@ func NewParser(config arg.Config, dests ...interface{}) (*Parser, error) {
 }
 
 const (
-	TOW = time.Second * 5 //watch TO
+	TOW = time.Second * 7 //watch TO
 )
 
 var (
@@ -105,43 +106,52 @@ func main() {
 	Fatal(err)
 	imag = strings.Split(filepath.Base(exe), ".")[0]
 
-	defer closer.Close()
-	closer.Bind(cleanup)
+	ips := ints()
+	Println(runtime.GOARCH, runtime.GOOS, GoVer(), repo, Ver, ips)
+	FatalOr("not connected - нет сети", len(ips) == 0)
 
 	// Like `parser := arg.MustParse(&args)` but override built in option `-v, --version` of package `arg`
 	parser, err := NewParser(arg.Config{}, &args)
 	Fatal(err)
-
-	a2s := make([]string, 0) // without built in option
-	deb := false
-	for _, arg := range os.Args[1:] {
-		switch strings.ToLower(arg) {
-		case "-help", "--help":
-			parser.WriteHelp(Std)
+	without_v := []string{}
+	if err := parser.Parse(os.Args[1:]); err != nil {
+		// s := strings.Join(os.Args[1:], " ")
+		// s = strings.ToLower(s)
+		switch {
+		case strings.HasSuffix(err.Error(), "help requested by user"):
+			if slices.Contains(os.Args[1:], "--help") {
+				parser.WriteHelp(Std)
+			} else {
+				parser.WriteUsage(Std)
+			}
 			return
-		case "-h":
-			parser.WriteUsage(Std)
-			return
-		case "-version", "--version":
-			Println(args.Version())
-			return
-		case "-v":
-			deb = true
-		default:
-			a2s = append(a2s, arg)
+		case strings.HasSuffix(err.Error(), "version requested by user"):
+			if slices.Contains(os.Args[1:], "--version") {
+				Println(args.Version())
+				return
+			} else {
+				// i := slices.Index(os.Args[1:], "-v")
+				// if i > -1 {
+				// 	without_v = slices.Replace(os.Args[1:], i, i+1, "--debug")
+				// }
+				for _, o := range os.Args[1:] {
+					if o == "-v" {
+						o = "--debug"
+					}
+					without_v = append(without_v, o)
+				}
+				parser.Parse(without_v)
+			}
 		}
-	}
-
-	if err := parser.Parse(a2s); err != nil {
-		parser.WriteUsage(Std)
-		Fatal(err)
 	}
 
 	if args.Ver {
 		Println(args.Version())
 		return
 	}
-	args.Debug = args.Debug || deb
+
+	defer closer.Close()
+	closer.Bind(cleanup)
 
 	SecretEncodeKey = append([]byte(repo+imag), make([]byte, 16)...)[:16]
 
@@ -165,19 +175,6 @@ func cleanup() {
 	}
 }
 
-func FingerprintSHA256(pubKey ssh.PublicKey) string {
-	return pubKey.Type() + " " + ssh.FingerprintSHA256(pubKey)
-}
-
-func GoVer() (s string) {
-	info, ok := rdebug.ReadBuildInfo()
-	s = "go"
-	if ok {
-		s = info.GoVersion
-	}
-	return
-}
-
 func base() string {
 	info, ok := rdebug.ReadBuildInfo()
 	if ok {
@@ -192,4 +189,33 @@ func base() string {
 		return filepath.Base(dir)
 	}
 	return "main"
+}
+
+func GoVer() (s string) {
+	info, ok := rdebug.ReadBuildInfo()
+	s = "go"
+	if ok {
+		s = info.GoVersion
+	}
+	return
+}
+
+func ints() (ips []string) {
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, ifac := range ifaces {
+			addrs, err := ifac.Addrs()
+			if err != nil || ifac.Flags&net.FlagUp == 0 || ifac.Flags&net.FlagRunning == 0 || ifac.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			for _, addr := range addrs {
+				if strings.Contains(addr.String(), ":") {
+					continue
+				}
+				ips = append(ips, strings.Split(addr.String(), "/")[0])
+			}
+		}
+		slices.Reverse(ips)
+	}
+	return
 }
